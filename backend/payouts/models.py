@@ -1,4 +1,12 @@
 from django.db import models
+from django.utils import timezone
+from datetime import timedelta
+
+IDEMPOTENCY_KEY_TTL_HOURS = 24
+
+
+def _default_expiry():
+    return timezone.now() + timedelta(hours=IDEMPOTENCY_KEY_TTL_HOURS)
 
 
 class Merchant(models.Model):
@@ -10,12 +18,12 @@ class Merchant(models.Model):
 
 class LedgerEntry(models.Model):
     CREDIT = "credit"
-    DEBIT = "debit"
+    DEBIT  = "debit"
     TYPE_CHOICES = [(CREDIT, "Credit"), (DEBIT, "Debit")]
 
-    merchant = models.ForeignKey(Merchant, on_delete=models.PROTECT, related_name="ledger_entries")
-    amount = models.BigIntegerField()  # paise only, never float
-    type = models.CharField(max_length=6, choices=TYPE_CHOICES)
+    merchant   = models.ForeignKey(Merchant, on_delete=models.PROTECT, related_name="ledger_entries")
+    amount     = models.BigIntegerField()          # paise only — never float
+    type       = models.CharField(max_length=6, choices=TYPE_CHOICES)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -26,42 +34,40 @@ class LedgerEntry(models.Model):
 
 
 class Payout(models.Model):
-    PENDING = "pending"
+    PENDING    = "pending"
     PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
+    COMPLETED  = "completed"
+    FAILED     = "failed"
 
     STATUS_CHOICES = [
-        (PENDING, "Pending"),
+        (PENDING,    "Pending"),
         (PROCESSING, "Processing"),
-        (COMPLETED, "Completed"),
-        (FAILED, "Failed"),
+        (COMPLETED,  "Completed"),
+        (FAILED,     "Failed"),
     ]
 
-    # Valid state transitions — terminal states have no outgoing edges
+    # Terminal states have no outgoing edges — enforced by transition_to()
     VALID_TRANSITIONS = {
-        PENDING: {PROCESSING},
+        PENDING:    {PROCESSING},
         PROCESSING: {COMPLETED, FAILED},
-        COMPLETED: set(),
-        FAILED: set(),
+        COMPLETED:  set(),
+        FAILED:     set(),
     }
 
-    merchant = models.ForeignKey(Merchant, on_delete=models.PROTECT, related_name="payouts")
-    amount = models.BigIntegerField()  # paise only, never float
-    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=PENDING)
+    merchant    = models.ForeignKey(Merchant, on_delete=models.PROTECT, related_name="payouts")
+    amount      = models.BigIntegerField()         # paise only — never float
+    status      = models.CharField(max_length=10, choices=STATUS_CHOICES, default=PENDING)
     retry_count = models.PositiveIntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)  # used for stuck-payout detection
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)  # heartbeat for stuck-payout detection
 
     class Meta:
         indexes = [models.Index(fields=["merchant", "status"])]
 
-    def transition_to(self, new_status):
+    def transition_to(self, new_status: str):
         """Enforce valid state transitions. Raises ValueError on invalid move."""
         if new_status not in self.VALID_TRANSITIONS[self.status]:
-            raise ValueError(
-                f"Invalid transition: {self.status} → {new_status}"
-            )
+            raise ValueError(f"Invalid transition: {self.status} → {new_status}")
         self.status = new_status
 
     def __str__(self):
@@ -69,13 +75,20 @@ class Payout(models.Model):
 
 
 class IdempotencyKey(models.Model):
-    key = models.CharField(max_length=255)
-    merchant = models.ForeignKey(Merchant, on_delete=models.PROTECT, related_name="idempotency_keys")
-    response = models.JSONField()
-    created_at = models.DateTimeField(auto_now_add=True)
+    key          = models.CharField(max_length=255)
+    merchant     = models.ForeignKey(Merchant, on_delete=models.PROTECT, related_name="idempotency_keys")
+    request_hash = models.CharField(max_length=64)   # SHA-256 of canonical request payload
+    response     = models.JSONField()
+    created_at   = models.DateTimeField(auto_now_add=True)
+    expires_at   = models.DateTimeField(default=_default_expiry)  # set to now + 24h on insert
 
     class Meta:
         unique_together = ("key", "merchant")
+        indexes = [models.Index(fields=["expires_at"])]  # for efficient cleanup queries
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() > self.expires_at
 
     def __str__(self):
         return f"{self.key} ({self.merchant})"

@@ -142,3 +142,61 @@ After 3 retries, the payout is marked `failed` and a refund credit entry is crea
 A payout is considered "stuck" if it has been in `processing` state for more than 30 seconds (`updated_at` timestamp). This prevents the task from re-processing a payout that another worker is actively handling.
 
 The `updated_at = DateTimeField(auto_now=True)` field on `Payout` is updated on every `.save()`, making it a reliable heartbeat for detecting stuck payouts.
+
+---
+
+## 🤖 AI Audit: Bug We Caught (and Fixed)
+
+**The Wrong AI Code:**
+
+AI initially suggested this for the refund logic in `tasks.py`:
+
+```python
+def _refund(payout):
+    """Issue a refund credit entry."""
+    LedgerEntry.objects.create(
+        merchant=payout.merchant,
+        amount=payout.amount,
+        type=LedgerEntry.CREDIT,
+    )
+```
+
+**The Bug:** If `_refund()` is called twice (due to a retry, a double-dispatch of the Celery task, or a race condition where two workers pick up the same payout), two credit entries are created. The first call legitimately reverses the debit. The second call is a duplicate and inflates the merchant's balance fraudulently.
+
+**Bad Outcomes:**
+- Merchant double-dip: paid out 1,000 paise, got refunded twice for 2,000 paise gained.
+- Incorrect audit trail and balance reconstruction: `SUM(credits) - SUM(debits)` would be wrong.
+- No way to detect bad refunds after the fact (append-only ledger alone doesn't catch logic errors).
+
+**What We Caught:** We added an idempotency guard:
+
+```python
+def _has_refund(payout) -> bool:
+    """Check if a credit refund entry already exists for this payout amount and merchant."""
+    return LedgerEntry.objects.filter(
+        merchant=payout.merchant,
+        amount=payout.amount,
+        type=LedgerEntry.CREDIT,
+    ).exists()
+
+def _refund(payout):
+    """Issue a credit refund. Guard against double-refund by checking first."""
+    if _has_refund(payout):
+        logger.warning(
+            "Refund already exists for payout_id=%s — skipping duplicate refund",
+            payout.id,
+        )
+        return
+    LedgerEntry.objects.create(
+        merchant=payout.merchant,
+        amount=payout.amount,
+        type=LedgerEntry.CREDIT,
+    )
+```
+
+**Why This Works:**
+- First refund call creates the credit entry and returns.
+- Any retry or duplicate call sees the existing entry and skips — idempotent.
+- Protects against the most common bug in payment systems: accidentally issuing duplicate credits.
+
+**The Deeper Lesson:** In financial systems, **idempotency must extend beyond API headers to business logic**. The database transaction handles atomicity, but the application layer must prevent *logical* duplicates.
