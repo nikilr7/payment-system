@@ -1,0 +1,26 @@
+{
+  "name": "payment-system",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+  "backend": "cd backend && venv\\Scripts\\python manage.py runserver",
+  "frontend": "cd frontend/frontend && npm run dev",
+  "start": "concurrently \"npm run backend\" \"npm run frontend\""
+},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikilr7/payment-system.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/nikilr7/payment-system/issues"
+  },
+  "homepage": "https://github.com/nikilr7/payment-system#readme",
+  "dependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
